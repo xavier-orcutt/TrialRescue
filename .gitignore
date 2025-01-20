@@ -1,6 +1,7 @@
 # Data files
 *.csv
 *.xlsx
+data/
 
 # Virtual environment
 myenv/
