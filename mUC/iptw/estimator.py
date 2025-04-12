@@ -9,6 +9,8 @@ from sklearn.preprocessing import OneHotEncoder, RobustScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 
+import matplotlib.pyplot as plt
+
 logging.basicConfig(
     level = logging.INFO,                                 
     format = '%(asctime)s - %(levelname)s - %(message)s'  
@@ -40,7 +42,8 @@ class IPTWEstimator:
         cont_var : list of str, optional 
             List of column names to be treated as continuous variables. Missing values will be imputed with median. 
         passthrough_var : list of str, optional 
-            List of variables to be included in the model without any transformation (e.g., binary variables without missingness)
+            List of binary variables to be included in the model without any transformation. Numeric variables that do not need 
+            transformation are better placed in the cont_var list. 
         stabilized : bool, default = False
             If True, returns stabilized weights (multiplying IPTW by marginal probability of treatment or control).
 
@@ -120,6 +123,10 @@ class IPTWEstimator:
                 raise ValueError(f"The following columns in passthrough_var have missing values: {pt_missing}")
 
         try:    
+            self.cat_var = cat_var or []
+            self.cont_var = cont_var or []
+            self.passthrough_var = passthrough_var or []
+            
             df = df.copy()
             
             # Build pipeline
@@ -168,5 +175,94 @@ class IPTWEstimator:
         except Exception as e:
             logging.error("Unable to calculate weights", exc_info=True)
             return None
+        
+    def plot_smd(self,
+                 return_df: bool = False):
+        """
+        Compute and plots standardized mean differences (SMDs) before and after weighting for all variables used in the IPTW model.
+
+        Parameters
+        ----------
+        return_df : bool, default = False
+            If True, returns the DataFrame of SMD values along with the plot figure.
+
+        This method uses internal attributes set during the `.weights()` call:
+            - self.weights_df : the DataFrame with variables, treatment, and weights
+            - self.cat_var : list of categorical variables
+            - self.cont_var : list of continuous variables
+            - self.passthrough_var : list of binary variables
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        A plot showing unweighted and weighted SMDs for all included variables.
+
+        pd.DataFrame (optional)
+            Returned only if `return_df=True`. Contains:
+                - variable : covariate name
+                - smd_unweighted : SMD with no weights
+                - smd_weighted : SMD using IPTW weights
+
+        Notes
+        -----
+        - SMD for continuous variables is calculated using pooled standard deviation (Cohen's d without degrees of freedom correction). 
+            Median imputation is performed for missing values prior to calculating SMD. 
+        - Categorical variables are one-hot-encoded prior to calculating SMD. 
+        """
+        # Input validation 
+        if self.weights_df is None:
+            raise ValueError("No weights found. Please run `.weights()` first.")
+        
+        all_var = self.cat_var + self.cont_var + self.passthrough_var
+        if not all_var:
+            raise ValueError("No variables found. Please run `.weights()` first.")
+        
+        try: 
+            smd_df = self.weights_df[all_var + ['treatment', 'weight']].copy()
+            treat = smd_df[smd_df['treatment'] == 1]
+            control = smd_df[smd_df['treatment'] == 0]
+
+            # Calculate SMD for continuous variables 
+            # Impute median for cont_var
+            for var in self.cont_var:
+                smd_df[var] = smd_df[var].fillna(smd_df[var].median())
+
+            smd_cont = []
+
+            for var in self.cont_var:
+                m1 = treat[var].mean()
+                m0 = control[var].mean()
+                s1 = treat[var].std()
+                s0 = control[var].std()
+
+                pooled_sd = np.sqrt(0.5 * (s1**2 + s0**2))
+                smd_unweighted = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0 # the if clause is a safety check to avoid dividing by zero
+
+                m1 = np.average(treat[var], weights = treat['weight'])
+                m0 = np.average(control[var], weights = control['weight'])
+                s1 = np.sqrt(np.average((treat[var] - m1) ** 2, weights = treat['weight']))
+                s0 = np.sqrt(np.average((control[var] - m0) ** 2, weights = control['weight']))
+
+                pooled_sd = np.sqrt(0.5 * (s1**2 + s0**2))
+                smd_weighed = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0 # the if clause is a safety check to avoid dividing by zero
+
+                smd_cont.append({
+                    'variable': var,
+                    'smd_unweighted': smd_unweighted,
+                    'smd_weighted': smd_weighed
+                })
+
+            # Return dataframe if requested
+            if return_df:
+                return fig, smd_df
+
+            return fig
+            
+        except: 
+            logging.error("Unable to calculate and plot SMD", exc_info=True)
+            return None
+        
+        
+
 
     
