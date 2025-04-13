@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, RobustScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 
@@ -27,7 +27,8 @@ class IPTWEstimator:
                 cat_var: Optional[List[str]] = None, 
                 cont_var: Optional[List[str]] = None, 
                 passthrough_var: Optional[List[str]] = None,
-                stabilized: bool = False) -> Optional[pd.DataFrame]:
+                stabilized: bool = False,
+                lr_kwargs: Optional[dict] = None) -> Optional[pd.DataFrame]:
         """
         Calculate inverse probability of treatment weights (IPTW) using logistic regression.
 
@@ -40,12 +41,19 @@ class IPTWEstimator:
         cat_var : list of str, optional
             List of column names to be treated as categorical variables. These will be one-hot encoded.
         cont_var : list of str, optional 
-            List of column names to be treated as continuous variables. Missing values will be imputed with median. 
+            List of column names to be treated as continuous variables. Missing values will be imputed with median 
+            and all values will be standardzied using sklearn's StandardScaler. 
         passthrough_var : list of str, optional 
-            List of binary variables to be included in the model without any transformation. Numeric variables that do not need 
-            transformation are better placed in the cont_var list. 
+            Variables to be included without transformation. Typically used for binary indicators with no missing values.
         stabilized : bool, default = False
             If True, returns stabilized weights (multiplying IPTW by marginal probability of treatment or control).
+        lr_kwargs : dict, optional
+            Keyword arguments to pass directly to scikit-learn's LogisticRegression class.
+            Common options include:
+                - 'class_weight' : str (e.g., 'balanced'), None, or dict 
+                - 'penalty' : 'l1', 'l2', 'elasticnet', or 'none'
+                - 'solver' : 'lbfgs', 'liblinear', 'newton-cg', 'newton-cholesky', 'sag', 'saga'
+                - 'max_iter' : int (e.g., 1000)
 
         Returns
         -------
@@ -65,8 +73,8 @@ class IPTWEstimator:
         
         - Regarding inputted variables: 
             - At least one of `cat_var`, `cont_var`, or `passthrough_var` must be provided; otherwise, the function will not proceed.
-            - All variables listed in cat_var must be of pandas category dtype and contain no missing values. 
-            - All variables listed in cont_var must be numeric (int or float dtypes). 
+            - All variables listed in cat_var must be of category dtype and contain no missing values. 
+            - All variables listed in cont_var must be numeric dtype (int or float). 
             - All variables listed in passthrough_var must contain no missing values. 
         """
 
@@ -132,7 +140,7 @@ class IPTWEstimator:
             # Build pipeline
             numeric_pipeline = Pipeline([
                 ('imputer', SimpleImputer(strategy = 'median')),
-                ('scaler', RobustScaler())
+                ('scaler', StandardScaler())
             ])
 
             categorical_pipeline = Pipeline([
@@ -151,7 +159,9 @@ class IPTWEstimator:
             X_preprocessed = preprocessor.fit_transform(df)
 
             # Calculating propensity scores using logistic regression 
-            lr_model = LogisticRegression(class_weight = 'balanced')
+            if lr_kwargs is None:
+                lr_kwargs = {}
+            lr_model = LogisticRegression(**lr_kwargs)
             lr_model.fit(X_preprocessed, df[treatment_col])
             propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
             df['propensity_score'] = propensity_score
