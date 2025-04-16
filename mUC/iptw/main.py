@@ -23,12 +23,10 @@ if __name__ == "__main__":
     df['treatment'] = np.where(df['LineName'] == 'chemo', 0, 1)
 
 
-    df_weights = estimator.weights(df = df,
-                                   treatment_col='treatment',
-                                   cat_var = ['ecog_index', 'GroupStage_mod'],
-                                   cont_var = ['age', 'creatinine', 'albumin'],
-                                   passthrough_var= ['Surgery', 'ecog_newly_gte2'],
-                                   stabilized=False)
-    
-    df_weights
+    a = estimator.fit_transform(df = df,
+                  treatment_col='treatment',
+                  cat_var = ['ecog_index', 'GroupStage_mod'],
+                  cont_var = ['age', 'creatinine', 'albumin'],
+                  passthrough_var= ['Surgery', 'ecog_newly_gte2'],
+                  stabilized=False)
     embed()

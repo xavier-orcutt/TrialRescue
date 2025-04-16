@@ -19,63 +19,56 @@ logging.basicConfig(
 class IPTWEstimator:
     
     def __init__(self):
+        self.treatment_col = None
+        self.cat_var = []
+        self.cont_var = []
+        self.passthrough_var = []
+        self.stabilized = False
+        self.propensity_score_df = None
         self.weights_df = None
 
-    def weights(self, 
-                df: pd.DataFrame, 
-                treatment_col: str, 
-                cat_var: Optional[List[str]] = None, 
-                cont_var: Optional[List[str]] = None, 
-                passthrough_var: Optional[List[str]] = None,
-                stabilized: bool = False,
-                lr_kwargs: Optional[dict] = None) -> Optional[pd.DataFrame]:
+    def fit(self, 
+            df: pd.DataFrame, 
+            treatment_col: str, 
+            cat_var: Optional[List[str]] = None, 
+            cont_var: Optional[List[str]] = None, 
+            passthrough_var: Optional[List[str]] = None,
+            stabilized: bool = False,
+            lr_kwargs: Optional[dict] = None) -> None:
         """
-        Calculate inverse probability of treatment weights (IPTW) using logistic regression.
+        Fit logistic regression model to calculate propensity scores for receipt of treatment. 
 
         Parameters
         ----------
         df : pd.DataFrame
             Input dataframe containing treatment assignment and variables of interest for calculating weights.
         treatment_col : str
-            Name of the column indicating treatment assignment (binary: 0 or 1).
+            Name of the binary treatment column (0 = control, 1 = treated).
         cat_var : list of str, optional
-            List of column names to be treated as categorical variables. These will be one-hot encoded.
+            Categorical variables to be one-hot encoded. Must be of dtype 'category' and contain no missing values.
         cont_var : list of str, optional 
-            List of column names to be treated as continuous variables. Missing values will be imputed with median 
-            and all values will be standardzied using sklearn's StandardScaler. 
+            Continuous variables to be imputed (median) and scaled. Must be numeric (int or float).
         passthrough_var : list of str, optional 
-            Variables to be included without transformation. Typically used for binary indicators with no missing values.
+            Variables to be passed through without transformation. Must not contain missing values.
         stabilized : bool, default = False
-            If True, returns stabilized weights (multiplying IPTW by marginal probability of treatment or control).
+            If True, enables stabilized weights in the transform step.
         lr_kwargs : dict, optional
-            Keyword arguments to pass directly to scikit-learn's LogisticRegression class.
+            Additional keyword arguments passed to sklearn's LogisticRegression.
             Common options include:
-                - 'class_weight' : str (e.g., 'balanced'), None, or dict 
-                - 'penalty' : 'l1', 'l2', 'elasticnet', or 'none'
-                - 'solver' : 'lbfgs', 'liblinear', 'newton-cg', 'newton-cholesky', 'sag', 'saga'
-                - 'max_iter' : int (e.g., 1000)
+                - 'class_weight' : None (default), 'balanced', or dict 
+                - 'penalty' : 'l2' (default), 'l1', 'elasticnet', or 'None'
+                - 'solver' : 'lbfgs' (default), 'liblinear', 'newton-cg', 'newton-cholesky', 'sag', or 'saga'
+                - 'max_iter' : int (default = 100)
 
         Returns
         -------
-        pd.DataFrame or None
-        A copy of the original DataFrame with the following columns: 
-                'propensity_score' : float
-                    calculated propensity scores 
-                'weight' : float 
-                    calculated inverse probability of treatment weight 
-        
-        Returns None if insufficient input is provided.
+        None
+            Updates internal state with propensity scores. Use `.transform()` to calculate weights
 
         Notes
         -----
-        - This function uses logistic regression to estimate the propensity score `P(Treatment=1 | X)`.
-        - Assumes binary treatment coded as 0 (control) and 1 (treated).
-        
-        - Regarding inputted variables: 
-            - At least one of `cat_var`, `cont_var`, or `passthrough_var` must be provided; otherwise, the function will not proceed.
-            - All variables listed in cat_var must be of category dtype and contain no missing values. 
-            - All variables listed in cont_var must be numeric dtype (int or float). 
-            - All variables listed in passthrough_var must contain no missing values. 
+        - This method only estimates propensity scores. Weights are calculated in `.transform()`.
+        - At least one of cat_var, cont_var, or passthrough_var must be provided.
         """
 
         # Input validation 
@@ -130,64 +123,109 @@ class IPTWEstimator:
             if pt_missing:
                 raise ValueError(f"The following columns in passthrough_var have missing values: {pt_missing}")
 
-        try:    
-            self.cat_var = cat_var or []
-            self.cont_var = cont_var or []
-            self.passthrough_var = passthrough_var or []
-            
-            df = df.copy()
-            
-            # Build pipeline
-            numeric_pipeline = Pipeline([
-                ('imputer', SimpleImputer(strategy = 'median')),
-                ('scaler', StandardScaler())
-            ])
+        # Save config
+        self.cat_var = cat_var or []
+        self.cont_var = cont_var or []
+        self.passthrough_var = passthrough_var or []
+        self.treatment_col = treatment_col
+        self.stabilized = stabilized
+        
+        df = df.copy()
+        
+        # Build pipeline
+        numeric_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy = 'median')),
+            ('scaler', StandardScaler())
+        ])
 
-            categorical_pipeline = Pipeline([
-                ('encoder', OneHotEncoder(handle_unknown = 'ignore'))
-            ])
+        categorical_pipeline = Pipeline([
+            ('encoder', OneHotEncoder(handle_unknown = 'ignore'))
+        ])
 
-            preprocessor = ColumnTransformer(
-                transformers = [
-                    ('num', numeric_pipeline, cont_var),
-                    ('cat', categorical_pipeline, cat_var),
-                    ('pass', 'passthrough', passthrough_var)],
-                    remainder = 'drop'
+        preprocessor = ColumnTransformer(
+            transformers = [
+                ('num', numeric_pipeline, cont_var),
+                ('cat', categorical_pipeline, cat_var),
+                ('pass', 'passthrough', passthrough_var)],
+                remainder = 'drop'
+        )
+
+        # Fit and transform
+        X_preprocessed = preprocessor.fit_transform(df)
+
+        # Calculating propensity scores using logistic regression 
+        if lr_kwargs is None:
+            lr_kwargs = {}
+        lr_model = LogisticRegression(**lr_kwargs)
+        lr_model.fit(X_preprocessed, df[treatment_col])
+        propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
+        df['propensity_score'] = propensity_score
+
+        self.propensity_score_df = df
+    
+    def transform(self) -> pd.DataFrame:
+        """
+        Calculate inverse probability of treatment weights (IPTW) based on fitted propensity scores.
+
+        Returns
+        -------
+        pd.DataFrame
+        A copy of the original DataFrame with the following columns:
+            'propensity_score' : float
+                calculated propensity scores 
+            'weight' : float
+                calculated IPTW 
+
+        Notes
+        -----
+        - For treated patients: weight = 1 / propensity score
+        - For control patients: weight = 1 / (1 - propensity score)
+        - If stabilized = True, weights are multiplied by the marginal probability of treatment or control.
+        - Must call `.fit()` before calling `.transform()`.
+        """
+        if self.propensity_score_df is None:
+            raise ValueError("Model not fitted. Please run `.fit()` first.")
+
+        df = self.propensity_score_df.copy()
+
+        if self.stabilized:
+            p_treated = df[self.treatment_col].mean()
+            df['weight'] = np.where(
+                df[self.treatment_col] == 1,
+                p_treated / df['propensity_score'],
+                (1 - p_treated) / (1 - df['propensity_score'])
             )
 
-            # Fit and transform
-            X_preprocessed = preprocessor.fit_transform(df)
+        else:
+            df['weight'] = np.where(
+                df[self.treatment_col] == 1,
+                1 / df['propensity_score'],
+                1 / (1 - df['propensity_score'])
+            )
 
-            # Calculating propensity scores using logistic regression 
-            if lr_kwargs is None:
-                lr_kwargs = {}
-            lr_model = LogisticRegression(**lr_kwargs)
-            lr_model.fit(X_preprocessed, df[treatment_col])
-            propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
-            df['propensity_score'] = propensity_score
-            
-            # If stabilized == True, calculate stabilized weight
-            if stabilized:
-                p_treated = df[treatment_col].mean()
-                df['weight'] = np.where(df[treatment_col] == 1,
-                                        p_treated / df['propensity_score'],
-                                        (1 - p_treated) / (1 - df['propensity_score']))
-                
-            # Otherwise, calculate unstabilized weights 
-            else: 
-                df['weight'] = np.where(df[treatment_col] == 1,
-                                        1/df['propensity_score'], 
-                                        1/(1 - df['propensity_score']))
+        self.weights_df = df
+        return df
+    
+    def fit_transform(self, 
+                      *args, 
+                      **kwargs) -> pd.DataFrame:
+        """
+        Fit the propensity score model and compute IPTW weights in one step.
 
-            self.weights_df = df
-            return df
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame with 'propensity_score' and 'weight' columns added.
 
-        except Exception as e:
-            logging.error("Unable to calculate weights", exc_info=True)
-            return None
+        Notes
+        -----
+        This is a convenience method equivalent to calling `.fit()` followed by `.transform()`.
+        """
+        self.fit(*args, **kwargs)
+        return self.transform()
         
-    def plot_smd(self,
-                 return_df: bool = False):
+    def smd(self,
+            return_fig: bool = False):
         """
         Compute and plots standardized mean differences (SMDs) before and after weighting for all variables used in the IPTW model.
 
@@ -238,7 +276,6 @@ class IPTWEstimator:
                 smd_df[var] = smd_df[var].fillna(smd_df[var].median())
 
             smd_cont = []
-
             for var in self.cont_var:
                 m1 = treat[var].mean()
                 m0 = control[var].mean()
@@ -262,11 +299,11 @@ class IPTWEstimator:
                     'smd_weighted': smd_weighed
                 })
 
-            # Return dataframe if requested
-            if return_df:
+            # Return figure if requested
+            if return_fig:
                 return fig, smd_df
 
-            return fig
+            return smd_df
             
         except: 
             logging.error("Unable to calculate and plot SMD", exc_info=True)
