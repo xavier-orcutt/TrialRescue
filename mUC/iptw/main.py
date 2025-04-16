@@ -27,6 +27,10 @@ if __name__ == "__main__":
                   treatment_col='treatment',
                   cat_var = ['ecog_index', 'GroupStage_mod'],
                   cont_var = ['age', 'creatinine', 'albumin'],
-                  passthrough_var= ['Surgery', 'ecog_newly_gte2'],
+                  binary_var= ['Surgery', 'ecog_newly_gte2'],
                   stabilized=False)
+    
+    b, c = estimator.smd(return_fig = True)
+    b.to_csv('../outputs/smd_df.csv', index = False)
+
     embed()

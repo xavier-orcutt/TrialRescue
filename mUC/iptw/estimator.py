@@ -22,17 +22,18 @@ class IPTWEstimator:
         self.treatment_col = None
         self.cat_var = []
         self.cont_var = []
-        self.passthrough_var = []
+        self.binary_var = []
         self.stabilized = False
         self.propensity_score_df = None
-        self.weights_df = None
+        self.weight_df = None
+        self.smd_results_df = None
 
     def fit(self, 
             df: pd.DataFrame, 
             treatment_col: str, 
             cat_var: Optional[List[str]] = None, 
             cont_var: Optional[List[str]] = None, 
-            passthrough_var: Optional[List[str]] = None,
+            binary_var: Optional[List[str]] = None,
             stabilized: bool = False,
             lr_kwargs: Optional[dict] = None) -> None:
         """
@@ -48,8 +49,9 @@ class IPTWEstimator:
             Categorical variables to be one-hot encoded. Must be of dtype 'category' and contain no missing values.
         cont_var : list of str, optional 
             Continuous variables to be imputed (median) and scaled. Must be numeric (int or float).
-        passthrough_var : list of str, optional 
-            Variables to be passed through without transformation. Must not contain missing values.
+        binary_var : list of str, optional 
+            Binary variables to be passed through without transformation. These must contain no missing values and should 
+            have only two unique values (e.g., 0/1 or True/False).
         stabilized : bool, default = False
             If True, enables stabilized weights in the transform step.
         lr_kwargs : dict, optional
@@ -68,7 +70,7 @@ class IPTWEstimator:
         Notes
         -----
         - This method only estimates propensity scores. Weights are calculated in `.transform()`.
-        - At least one of cat_var, cont_var, or passthrough_var must be provided.
+        - At least one of cat_var, cont_var, or binary_var must be provided.
         """
 
         # Input validation 
@@ -82,8 +84,8 @@ class IPTWEstimator:
         if df[treatment_col].isnull().any():
             raise ValueError('treatment_col has missing values')
         
-        if all(var is None for var in [cat_var, cont_var, passthrough_var]):
-            raise ValueError('at least one of cat_var, cont_var, or passthrough_var must be provided')
+        if all(var is None for var in [cat_var, cont_var, binary_var]):
+            raise ValueError('at least one of cat_var, cont_var, or binary_var must be provided')
         
         if cat_var is not None:
             # Check that columns in cat_var are present in the df
@@ -112,21 +114,34 @@ class IPTWEstimator:
             if non_numeric:
                 raise ValueError(f"The following columns in cont_var are not numeric: {non_numeric}")
 
-        if passthrough_var is not None:
-            # Check that columns in passthrough_var are present in the df
-            missing = [col for col in passthrough_var if col not in df.columns]
+        if binary_var is not None:
+            # Check that columns in binary_var are present in the df
+            missing = [col for col in binary_var if col not in df.columns]
             if missing:
-                raise ValueError(f"The following columns in passthrough_var are missing from the DataFrame: {missing}")
+                raise ValueError(f"The following columns in binary_var are missing from the DataFrame: {missing}")
             
-            # Check that columns in passthrough_var have no missing values
-            pt_missing = [col for col in passthrough_var if df[col].isnull().any()]
+            # Check that columns in binary_var have no missing values
+            pt_missing = [col for col in binary_var if df[col].isnull().any()]
             if pt_missing:
-                raise ValueError(f"The following columns in passthrough_var have missing values: {pt_missing}")
+                raise ValueError(f"The following columns in binary_var have missing values: {pt_missing}")
+            
+            # Check that all binary_var are binary (only 2 unique values)
+            not_binary = [
+                col for col in binary_var
+                if df[col].nunique() > 2
+            ]
+            if not_binary:
+                raise ValueError(f"The following columns in binary_var are not binary: {not_binary}")
+            
+            # Convert True/False to 1/0 for consistency
+            for col in binary_var:
+                if df[col].dtype == 'bool':
+                    df[col] = df[col].astype(int)
 
         # Save config
         self.cat_var = cat_var or []
         self.cont_var = cont_var or []
-        self.passthrough_var = passthrough_var or []
+        self.binary_var = binary_var or []
         self.treatment_col = treatment_col
         self.stabilized = stabilized
         
@@ -146,7 +161,7 @@ class IPTWEstimator:
             transformers = [
                 ('num', numeric_pipeline, cont_var),
                 ('cat', categorical_pipeline, cat_var),
-                ('pass', 'passthrough', passthrough_var)],
+                ('pass', 'passthrough', binary_var)],
                 remainder = 'drop'
         )
 
@@ -203,7 +218,7 @@ class IPTWEstimator:
                 1 / (1 - df['propensity_score'])
             )
 
-        self.weights_df = df
+        self.weight_df = df
         return df
     
     def fit_transform(self, 
@@ -231,83 +246,176 @@ class IPTWEstimator:
 
         Parameters
         ----------
-        return_df : bool, default = False
-            If True, returns the DataFrame of SMD values along with the plot figure.
+        return_fig : bool, default = False
+            If True, returns a Love plot of the SMDs, which is a dot plot with variable names on the y-axis and standardized mean 
+            differences on the x-axis.
 
-        This method uses internal attributes set during the `.weights()` call:
+        This method uses internal attributes set during the .fit() and .transform() or fit_transform() calls:
             - self.weights_df : the DataFrame with variables, treatment, and weights
             - self.cat_var : list of categorical variables
             - self.cont_var : list of continuous variables
-            - self.passthrough_var : list of binary variables
+            - self.binary_var : list of binary variables
 
         Returns
         -------
-        matplotlib.figure.Figure
-        A plot showing unweighted and weighted SMDs for all included variables.
-
-        pd.DataFrame (optional)
+        pd.DataFrame
             Returned only if `return_df=True`. Contains:
-                - variable : covariate name
+                - variable : variable name
                 - smd_unweighted : SMD with no weights
-                - smd_weighted : SMD using IPTW weights
+                - smd_weighted : SMD using IPTW 
+
+        matplotlib.figure.Figure (optional)
+            Returned only if `return_fig=True`.
+            A plot showing unweighted and weighted SMDs for all included variables.
 
         Notes
         -----
-        - SMD for continuous variables is calculated using pooled standard deviation (Cohen's d without degrees of freedom correction). 
-            Median imputation is performed for missing values prior to calculating SMD. 
-        - Categorical variables are one-hot-encoded prior to calculating SMD. 
+        SMDs quantify the difference in variable distributions between treated and control groups.
+
+        For continuous variables:
+            SMD = (mean_treated - mean_control) / sqrt[(sd_treated² + sd_control²)/2]
+
+        For categorical and binary variables:
+            SMD = (p_treated - p_control) / sqrt[(p_treated * (1 - p_treated) + p_control * (1 - p_control)) / 2]
+
+        Where:
+            - mean_treated / mean_control = means of the variable in each group
+            - sd_treated / sd_control = standard deviations
+            - p_treated / p_control = proportion of group members in a given category or with value == 1
+        
+        Median is imputed for missing continuous variables. 
+        Categorical variables are one-hot-encoded.
         """
         # Input validation 
-        if self.weights_df is None:
-            raise ValueError("No weights found. Please run `.weights()` first.")
-        
-        all_var = self.cat_var + self.cont_var + self.passthrough_var
+        all_var = self.cat_var + self.cont_var + self.binary_var
         if not all_var:
-            raise ValueError("No variables found. Please run `.weights()` first.")
-        
-        try: 
-            smd_df = self.weights_df[all_var + ['treatment', 'weight']].copy()
-            treat = smd_df[smd_df['treatment'] == 1]
-            control = smd_df[smd_df['treatment'] == 0]
+            raise ValueError("No variables found. Please run .fit() or fit_trasnform()")
 
-            # Calculate SMD for continuous variables 
-            # Impute median for cont_var
-            for var in self.cont_var:
-                smd_df[var] = smd_df[var].fillna(smd_df[var].median())
+        if self.weight_df is None:
+            raise ValueError("No weights found. Please run .transform() or fit_trasnform()")
 
-            smd_cont = []
-            for var in self.cont_var:
-                m1 = treat[var].mean()
-                m0 = control[var].mean()
-                s1 = treat[var].std()
-                s0 = control[var].std()
+        smd_df = self.weight_df[all_var + ['treatment', 'weight']].copy()
 
-                pooled_sd = np.sqrt(0.5 * (s1**2 + s0**2))
-                smd_unweighted = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0 # the if clause is a safety check to avoid dividing by zero
+        # Calculate SMD for continuous variables 
+        smd_cont = []
+        for var in self.cont_var:
+            # Imput median for missing 
+            smd_df[var] = smd_df[var].fillna(smd_df[var].median())
 
-                m1 = np.average(treat[var], weights = treat['weight'])
-                m0 = np.average(control[var], weights = control['weight'])
-                s1 = np.sqrt(np.average((treat[var] - m1) ** 2, weights = treat['weight']))
-                s0 = np.sqrt(np.average((control[var] - m0) ** 2, weights = control['weight']))
+            treat_mask = smd_df['treatment'] == 1
+            control_mask = smd_df['treatment'] == 0
 
-                pooled_sd = np.sqrt(0.5 * (s1**2 + s0**2))
-                smd_weighed = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0 # the if clause is a safety check to avoid dividing by zero
+            # Unweighted
+            m1 = smd_df.loc[treat_mask, var].mean()
+            m0 = smd_df.loc[control_mask, var].mean()
+            s1 = smd_df.loc[treat_mask, var].std()
+            s0 = smd_df.loc[control_mask, var].std()
 
-                smd_cont.append({
-                    'variable': var,
+            pooled_sd = np.sqrt(0.5 * (s1**2 + s0**2))
+            smd_unweighted = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0
+
+            # Weighted
+            m1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'weight'])
+            m0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'weight'])
+            s1_w = np.sqrt(np.average((smd_df.loc[treat_mask, var] - m1_w) ** 2, weights=smd_df.loc[treat_mask, 'weight']))
+            s0_w = np.sqrt(np.average((smd_df.loc[control_mask, var] - m0_w) ** 2, weights=smd_df.loc[control_mask, 'weight']))
+
+            pooled_sd_w = np.sqrt(0.5 * (s1_w**2 + s0_w**2))
+            smd_weighted = (m1_w - m0_w) / pooled_sd_w if pooled_sd_w > 0 else 0.0
+
+            smd_cont.append({
+                'variable': var,
+                'smd_unweighted': smd_unweighted,
+                'smd_weighted': smd_weighted
+            })
+
+        # Calculate SMD for categorical variables 
+        smd_cat = []
+        for var in self.cat_var: 
+            # One-hot encode categories
+            categories = smd_df[var].dropna().unique()
+            for cat in categories:
+                var_cat = f"{var}__{cat}"
+                treat_mask = (smd_df['treatment'] == 1)
+                control_mask = (smd_df['treatment'] == 0)
+                smd_df[var_cat] = (smd_df[var] == cat).astype(int)
+
+                # Unweighted
+                p1 = smd_df.loc[treat_mask, var_cat].mean()
+                p0 = smd_df.loc[control_mask, var_cat].mean()
+                denom = np.sqrt((p1 * (1 - p1) + p0 * (1 - p0)) / 2)
+                smd_unweighted = (p1 - p0) / denom if denom > 0 else 0.0
+
+                # Weighted
+                p1_w = np.average(smd_df.loc[treat_mask, var_cat], weights=smd_df.loc[treat_mask, 'weight'])
+                p0_w = np.average(smd_df.loc[control_mask, var_cat], weights=smd_df.loc[control_mask, 'weight'])
+                denom_w = np.sqrt((p1_w * (1 - p1_w) + p0_w * (1 - p0_w)) / 2)
+                smd_weighted = (p1_w - p0_w) / denom_w if denom_w > 0 else 0.0
+
+                smd_cat.append({
+                    'variable': var_cat,
                     'smd_unweighted': smd_unweighted,
-                    'smd_weighted': smd_weighed
+                    'smd_weighted': smd_weighted
                 })
+        
+        # Calculate SMD for binary variables 
+        smd_bin = []
+        for var in self.binary_var:
+            treat_mask = smd_df['treatment'] == 1
+            control_mask = smd_df['treatment'] == 0
 
-            # Return figure if requested
-            if return_fig:
-                return fig, smd_df
+            # Unweighted
+            p1 = smd_df.loc[treat_mask, var].mean()
+            p0 = smd_df.loc[control_mask, var].mean()
+            denom = np.sqrt((p1 * (1 - p1) + p0 * (1 - p0)) / 2)
+            smd_unweighted = (p1 - p0) / denom if denom > 0 else 0.0
 
-            return smd_df
+            # Weighted
+            p1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'weight'])
+            p0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'weight'])
+            denom_w = np.sqrt((p1_w * (1 - p1_w) + p0_w * (1 - p0_w)) / 2)
+            smd_weighted = (p1_w - p0_w) / denom_w if denom_w > 0 else 0.0
+
+            smd_bin.append({
+                'variable': var,
+                'smd_unweighted': smd_unweighted,
+                'smd_weighted': smd_weighted
+            })
+
+        smd_results_df = pd.DataFrame(smd_cont + smd_cat + smd_bin)
+        smd_results_df['smd_unweighted'] = smd_results_df['smd_unweighted'].abs()
+        smd_results_df['smd_weighted'] = smd_results_df['smd_weighted'].abs()
+        smd_results_df = smd_results_df.sort_values(by = 'smd_unweighted', ascending = True).reset_index(drop = True)
+
+        self.smd_results_df = smd_results_df
+        
+        if return_fig:
+            fig, ax = plt.subplots(figsize=(8, 0.4 * len(smd_results_df) + 2))
             
-        except: 
-            logging.error("Unable to calculate and plot SMD", exc_info=True)
-            return None
+            # Plot points
+            ax.scatter(smd_results_df['smd_unweighted'], smd_results_df['variable'], label = 'Unweighted', color = 'red')
+            ax.scatter(smd_results_df['smd_weighted'], smd_results_df['variable'], label = 'Weighted', color = 'skyblue')
+
+            # Reference lines
+            ax.axvline(x = 0, color = 'black', linestyle = '-', linewidth = 2, alpha = 0.5) 
+            ax.axvline(x = 0.1, color = 'black', linestyle = '--', linewidth = 2, alpha = 0.5) 
+
+            # Axis labels and limits
+            ax.set_xlabel('Absolute Standardized Mean Difference', labelpad = 15, size = 12, weight = 'bold')
+            ax.set_xlim(-0.02)
+            plt.gca().spines['top'].set_visible(False)
+            plt.gca().spines['right'].set_visible(False)
+
+            # Title legend
+            ax.set_title('Love Plot: Variable Balance', pad = 20, size = 18, weight = 'bold')
+            ax.legend(prop = {'size': 10})
+
+            plt.tight_layout()
+            
+            return smd_results_df, fig
+        
+        else:
+            return smd_results_df
         
         
 
