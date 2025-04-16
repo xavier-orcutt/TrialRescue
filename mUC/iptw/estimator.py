@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import List, Optional
+from typing import Optional, Union, Tuple, List
 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
@@ -36,7 +36,7 @@ class IPTWEstimator:
             binary_var: Optional[List[str]] = None,
             stabilized: bool = False,
             lr_kwargs: Optional[dict] = None,
-            clip_bounds: Optional[tuple] = None) -> None:
+            clip_bounds: Optional[Union[Tuple[float, float], List[float]]] = None) -> None:
         """
         Fit logistic regression model to calculate propensity scores for receipt of treatment. 
 
@@ -57,12 +57,7 @@ class IPTWEstimator:
             If True, enables stabilized weights in the transform step.
         lr_kwargs : dict, optional
             Additional keyword arguments passed to sklearn's LogisticRegression.
-            Common options include:
-                - 'class_weight' : None (default), 'balanced', or dict 
-                - 'penalty' : 'l2' (default), 'l1', 'elasticnet', or 'None'
-                - 'solver' : 'lbfgs' (default), 'liblinear', 'newton-cg', 'newton-cholesky', 'sag', or 'saga'
-                - 'max_iter' : int (default = 100)
-        clip_bounds : tuple of float, optional
+        clip_bounds : tuple of float or list of float, optional
             If provided, clip propensity scores to this (min, max) range. 
             Common choice is (0.01, 0.99) to reduce the influence of extreme values.
 
