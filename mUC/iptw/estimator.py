@@ -35,7 +35,8 @@ class IPTWEstimator:
             cont_var: Optional[List[str]] = None, 
             binary_var: Optional[List[str]] = None,
             stabilized: bool = False,
-            lr_kwargs: Optional[dict] = None) -> None:
+            lr_kwargs: Optional[dict] = None,
+            clip_bounds: Optional[tuple] = None) -> None:
         """
         Fit logistic regression model to calculate propensity scores for receipt of treatment. 
 
@@ -61,6 +62,9 @@ class IPTWEstimator:
                 - 'penalty' : 'l2' (default), 'l1', 'elasticnet', or 'None'
                 - 'solver' : 'lbfgs' (default), 'liblinear', 'newton-cg', 'newton-cholesky', 'sag', or 'saga'
                 - 'max_iter' : int (default = 100)
+        clip_bounds : tuple of float, optional
+            If provided, clip propensity scores to this (min, max) range. 
+            Common choice is (0.01, 0.99) to reduce the influence of extreme values.
 
         Returns
         -------
@@ -138,6 +142,19 @@ class IPTWEstimator:
                 if df[col].dtype == 'bool':
                     df[col] = df[col].astype(int)
 
+        if clip_bounds is not None:
+            if (not isinstance(clip_bounds, (tuple, list)) or
+                len(clip_bounds) != 2):
+                raise ValueError("clip_bounds must be a tuple or list of two float values (min, max).")
+
+            lower, upper = clip_bounds
+
+            if not (isinstance(lower, (int, float)) and isinstance(upper, (int, float))):
+                raise ValueError("Both values in clip_bounds must be numeric.")
+
+            if not (0 < lower < upper < 1):
+                raise ValueError("clip_bounds values must be between 0 and 1 and satisfy 0 < lower < upper.")
+
         # Save config
         self.cat_var = cat_var or []
         self.cont_var = cont_var or []
@@ -174,8 +191,13 @@ class IPTWEstimator:
         lr_model = LogisticRegression(**lr_kwargs)
         lr_model.fit(X_preprocessed, df[treatment_col])
         propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
+        
+        # Apply clipping if requested
+        if clip_bounds is not None:
+            lower, upper = clip_bounds
+            propensity_score = np.clip(propensity_score, lower, upper)
+        
         df['propensity_score'] = propensity_score
-
         self.propensity_score_df = df
     
     def transform(self) -> pd.DataFrame:
@@ -266,7 +288,7 @@ class IPTWEstimator:
         fig, ax = plt.subplots(figsize=(8, 5))
 
         # Histogram for treated patients
-        plt.hist(df[df[treatment_col] == 1]['propensity_score'], 
+        ax.hist(df[df[treatment_col] == 1]['propensity_score'], 
                  bins = bins, 
                  alpha = 0.3, 
                  label = 'Treatment', 
@@ -274,7 +296,7 @@ class IPTWEstimator:
                  edgecolor='black')
         
         # Histogram for untreated patients (horizontal, with negative counts to "flip" it)
-        plt.hist(df[df[treatment_col] == 0]['propensity_score'], 
+        ax.hist(df[df[treatment_col] == 0]['propensity_score'], 
                  bins = bins, 
                  weights= -np.ones_like(df[df[treatment_col] == 0]['propensity_score']),
                  alpha = 0.3, 
@@ -286,15 +308,15 @@ class IPTWEstimator:
         ax.set_title('Propensity Score Distribution by Treatment Group', pad = 25, size = 18, weight = 'bold')
         ax.set_xlabel('Propensity Score', labelpad = 15, size = 12, weight = 'bold')
         ax.set_ylabel('Count', labelpad = 15, size = 12, weight = 'bold')
-        plt.gca().spines['top'].set_visible(False)
-        plt.gca().spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
-        yticks = plt.gca().get_yticks()
-        plt.gca().set_yticklabels([f'{abs(int(tick))}' for tick in yticks])
+        yticks = ax.get_yticks()
+        ax.set_yticklabels([f'{abs(int(tick))}' for tick in yticks])
 
         ax.legend(prop = {'size': 10})
 
-        plt.tight_layout()
+        fig.tight_layout()
         return fig
         
     def smd(self,
@@ -347,10 +369,10 @@ class IPTWEstimator:
         # Input validation 
         all_var = self.cat_var + self.cont_var + self.binary_var
         if not all_var:
-            raise ValueError("No variables found. Please run .fit() or fit_trasnform()")
+            raise ValueError("No variables found. Please run .fit() or fit_transform()")
 
         if self.weight_df is None:
-            raise ValueError("No weights found. Please run .transform() or fit_trasnform()")
+            raise ValueError("No weights found. Please run .transform() or fit_transform()")
 
         smd_df = self.weight_df[all_var + ['treatment', 'weight']].copy()
 
@@ -461,14 +483,14 @@ class IPTWEstimator:
             # Axis labels and limits
             ax.set_xlabel('Absolute Standardized Mean Difference', labelpad = 15, size = 12, weight = 'bold')
             ax.set_xlim(-0.02)
-            plt.gca().spines['top'].set_visible(False)
-            plt.gca().spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
 
             # Title legend
             ax.set_title('Love Plot: Variable Balance', pad = 20, size = 18, weight = 'bold')
             ax.legend(prop = {'size': 10})
 
-            plt.tight_layout()
+            fig.tight_layout()
             
             return smd_results_df, fig
         
