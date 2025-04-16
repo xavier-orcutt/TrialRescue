@@ -238,6 +238,64 @@ class IPTWEstimator:
         """
         self.fit(*args, **kwargs)
         return self.transform()
+    
+    def ps_plot(self,
+                bins: int = 20): 
+        """
+        Generates a propensity score overlap plot for treatment vs control. 
+
+        Parameters
+        ----------
+        bins : int, default = 20
+            Number of bins for the histogram
+
+        This method uses internal attributes set during the .fit() or fit_transform() calls:
+            - self.propensity_score_df : the DataFrame with variables, treatment, and propensity scores 
+
+        Returns
+        -------
+        matplotlib.figure.Figure 
+            A histogram plot showing raw propensity scores by treatment group. 
+        """
+        if self.propensity_score_df is None:
+            raise ValueError("propensity_score_df is None. Please call `.fit()` or `.fit_transform()` first.")
+        
+        df = self.propensity_score_df
+        treatment_col = self.treatment_col
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        # Histogram for treated patients
+        plt.hist(df[df[treatment_col] == 1]['propensity_score'], 
+                 bins = bins, 
+                 alpha = 0.3, 
+                 label = 'Treatment', 
+                 color = 'blue',
+                 edgecolor='black')
+        
+        # Histogram for untreated patients (horizontal, with negative counts to "flip" it)
+        plt.hist(df[df[treatment_col] == 0]['propensity_score'], 
+                 bins = bins, 
+                 weights= -np.ones_like(df[df[treatment_col] == 0]['propensity_score']),
+                 alpha = 0.3, 
+                 label = 'Control', 
+                 color = 'green', 
+                 edgecolor = 'black')
+
+        # Adding titles and labels
+        ax.set_title('Propensity Score Distribution by Treatment Group', pad = 25, size = 18, weight = 'bold')
+        ax.set_xlabel('Propensity Score', labelpad = 15, size = 12, weight = 'bold')
+        ax.set_ylabel('Count', labelpad = 15, size = 12, weight = 'bold')
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+
+        yticks = plt.gca().get_yticks()
+        plt.gca().set_yticklabels([f'{abs(int(tick))}' for tick in yticks])
+
+        ax.legend(prop = {'size': 10})
+
+        plt.tight_layout()
+        return fig
         
     def smd(self,
             return_fig: bool = False):
