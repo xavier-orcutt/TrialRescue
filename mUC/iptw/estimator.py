@@ -23,9 +23,13 @@ class IPTWEstimator:
         self.cat_var = []
         self.cont_var = []
         self.binary_var = []
+        self.all_var = []
         self.stabilized = False
+        self.clip_bounds = None
+
         self.propensity_score_df = None
         self.weight_df = None
+        self.weight_col = None
         self.smd_results_df = None
 
     def fit(self, 
@@ -45,7 +49,7 @@ class IPTWEstimator:
         df : pd.DataFrame
             Input dataframe containing treatment assignment and variables of interest for calculating weights.
         treatment_col : str
-            Name of the binary treatment column (0 = control, 1 = treated).
+            Name of the binary treatment column (0 = control, 1 = treated). Must be of integer type. 
         cat_var : list of str, optional
             Categorical variables to be one-hot encoded. Must be of dtype 'category' and contain no missing values.
         cont_var : list of str, optional 
@@ -74,14 +78,16 @@ class IPTWEstimator:
 
         # Input validation 
         if not isinstance(df, pd.DataFrame):
-            raise ValueError("df must be a pandas DataFrame")
+            raise ValueError("df must be a pandas DataFrame.")
         
         if treatment_col not in df.columns:
-            raise ValueError('treatment_col not found in df')
-        if not set(df[treatment_col].unique()).issubset({0, 1}):
-            raise ValueError('treatment_col must contain only binary values (0 and 1)')
+            raise ValueError('treatment_col not found in df.')
         if df[treatment_col].isnull().any():
-            raise ValueError('treatment_col has missing values')
+            raise ValueError('treatment_col has missing values.')
+        if not set(df[treatment_col].unique()).issubset({0, 1}):
+            raise ValueError('treatment_col must contain only binary values (0 and 1).')
+        if not pd.api.types.is_integer_dtype(df[col]):
+            raise ValueError(f"Column '{col}' must be of integer type.")
         
         if all(var is None for var in [cat_var, cont_var, binary_var]):
             raise ValueError('at least one of cat_var, cont_var, or binary_var must be provided')
@@ -136,6 +142,9 @@ class IPTWEstimator:
             for col in binary_var:
                 if df[col].dtype == 'bool':
                     df[col] = df[col].astype(int)
+        
+        if not isinstance(stabilized, bool):
+            raise ValueError("stabilized must be a boolean (True or False).")
 
         if clip_bounds is not None:
             if (not isinstance(clip_bounds, (tuple, list)) or
@@ -154,8 +163,11 @@ class IPTWEstimator:
         self.cat_var = cat_var or []
         self.cont_var = cont_var or []
         self.binary_var = binary_var or []
+        self.all_var = self.cat_var + self.cont_var + self.binary_var
+
         self.treatment_col = treatment_col
         self.stabilized = stabilized
+        self.clip_bounds = clip_bounds
         
         df = df.copy()
         
@@ -188,8 +200,8 @@ class IPTWEstimator:
         propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
         
         # Apply clipping if requested
-        if clip_bounds is not None:
-            lower, upper = clip_bounds
+        if self.clip_bounds is not None:
+            lower, upper = self.clip_bounds
             propensity_score = np.clip(propensity_score, lower, upper)
         
         df['propensity_score'] = propensity_score
@@ -205,7 +217,7 @@ class IPTWEstimator:
         A copy of the original DataFrame with the following columns:
             'propensity_score' : float
                 calculated propensity scores 
-            'weight' : float
+            'iptw' : float
                 calculated IPTW 
 
         Notes
@@ -222,20 +234,21 @@ class IPTWEstimator:
 
         if self.stabilized:
             p_treated = df[self.treatment_col].mean()
-            df['weight'] = np.where(
+            df['iptw'] = np.where(
                 df[self.treatment_col] == 1,
                 p_treated / df['propensity_score'],
                 (1 - p_treated) / (1 - df['propensity_score'])
             )
 
         else:
-            df['weight'] = np.where(
+            df['iptw'] = np.where(
                 df[self.treatment_col] == 1,
                 1 / df['propensity_score'],
                 1 / (1 - df['propensity_score'])
             )
 
         self.weight_df = df
+        self.weight_col = "iptw"
         return df
     
     def fit_transform(self, 
@@ -247,7 +260,7 @@ class IPTWEstimator:
         Returns
         -------
         pd.DataFrame
-            A DataFrame with 'propensity_score' and 'weight' columns added.
+            A DataFrame with 'propensity_score' and 'iptw' columns added.
 
         Notes
         -----
@@ -362,14 +375,16 @@ class IPTWEstimator:
         Categorical variables are one-hot-encoded.
         """
         # Input validation 
-        all_var = self.cat_var + self.cont_var + self.binary_var
-        if not all_var:
+        if not self.all_var:
             raise ValueError("No variables found. Please run .fit() or fit_transform()")
 
         if self.weight_df is None:
-            raise ValueError("No weights found. Please run .transform() or fit_transform()")
+            raise ValueError("No weights found. Please run fit_transform()")
+        
+        if not isinstance(return_fig, bool):
+            raise ValueError("return_fig must be a boolean (True or False).")
 
-        smd_df = self.weight_df[all_var + ['treatment', 'weight']].copy()
+        smd_df = self.weight_df[self.all_var + ['treatment', 'itpw']].copy()
 
         # Calculate SMD for continuous variables 
         smd_cont = []
@@ -390,10 +405,10 @@ class IPTWEstimator:
             smd_unweighted = (m1 - m0) / pooled_sd if pooled_sd > 0 else 0.0
 
             # Weighted
-            m1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'weight'])
-            m0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'weight'])
-            s1_w = np.sqrt(np.average((smd_df.loc[treat_mask, var] - m1_w) ** 2, weights=smd_df.loc[treat_mask, 'weight']))
-            s0_w = np.sqrt(np.average((smd_df.loc[control_mask, var] - m0_w) ** 2, weights=smd_df.loc[control_mask, 'weight']))
+            m1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'iptw'])
+            m0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'iptw'])
+            s1_w = np.sqrt(np.average((smd_df.loc[treat_mask, var] - m1_w) ** 2, weights=smd_df.loc[treat_mask, 'iptw']))
+            s0_w = np.sqrt(np.average((smd_df.loc[control_mask, var] - m0_w) ** 2, weights=smd_df.loc[control_mask, 'iptw']))
 
             pooled_sd_w = np.sqrt(0.5 * (s1_w**2 + s0_w**2))
             smd_weighted = (m1_w - m0_w) / pooled_sd_w if pooled_sd_w > 0 else 0.0
@@ -422,8 +437,8 @@ class IPTWEstimator:
                 smd_unweighted = (p1 - p0) / denom if denom > 0 else 0.0
 
                 # Weighted
-                p1_w = np.average(smd_df.loc[treat_mask, var_cat], weights=smd_df.loc[treat_mask, 'weight'])
-                p0_w = np.average(smd_df.loc[control_mask, var_cat], weights=smd_df.loc[control_mask, 'weight'])
+                p1_w = np.average(smd_df.loc[treat_mask, var_cat], weights=smd_df.loc[treat_mask, 'iptw'])
+                p0_w = np.average(smd_df.loc[control_mask, var_cat], weights=smd_df.loc[control_mask, 'iptw'])
                 denom_w = np.sqrt((p1_w * (1 - p1_w) + p0_w * (1 - p0_w)) / 2)
                 smd_weighted = (p1_w - p0_w) / denom_w if denom_w > 0 else 0.0
 
@@ -446,8 +461,8 @@ class IPTWEstimator:
             smd_unweighted = (p1 - p0) / denom if denom > 0 else 0.0
 
             # Weighted
-            p1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'weight'])
-            p0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'weight'])
+            p1_w = np.average(smd_df.loc[treat_mask, var], weights=smd_df.loc[treat_mask, 'iptw'])
+            p0_w = np.average(smd_df.loc[control_mask, var], weights=smd_df.loc[control_mask, 'iptw'])
             denom_w = np.sqrt((p1_w * (1 - p1_w) + p0_w * (1 - p0_w)) / 2)
             smd_weighted = (p1_w - p0_w) / denom_w if denom_w > 0 else 0.0
 
@@ -492,7 +507,142 @@ class IPTWEstimator:
         else:
             return smd_results_df
         
+    def survival_metrics(self,
+                         df: pd.DataFrame,
+                         weight_col: Optional[str] = None, 
+                         duration_col: str,
+                         event_col: str,
+                         psurv_time_points: Optional[List[float]] = None, 
+                         rmst_time_points: Optional[List[float]] = None,
+                         median_time: Optional[bool] = False,
+                         n_bootstrap: int = 1000,
+                         random_state: Optional[int] = None) -> dict:
+
+        """
+        Estimate survival metrics for treatment group, control group, and their difference using 
+        IPTW-adjusted Kaplan-Meier analysis with bootstrapped 95% confidence intervals.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Input dataframe containing survival data, treatment assignment, and all variables used 
+            in the IPTW model. This should match the structure of the dataframe used in the original 
+            fit()/fit_transform() call.
+        weight_col : str, optional 
+             Name of the column in `df` containing the IPTW weights. If not provided, defaults to the 
+            column name used in `.fit_transform()` (typically "iptw"). 
+            If you have renamed the weight column or are using a modified dataframe, you must specify 
+            the correct column name explicitly. The column must contain non-negative numeric weights.
+        duration_col : str
+            Name of the column containing the survival duration (e.g., time to event or censoring).
+        event_col : str
+            Name of the column indicating event occurrence (1 = event, 0 = censored). Must be of integer type. 
+        psurv_time_points : list of float, optional
+            Specific time points (in same units as duration_col) at which to estimate survival probability.
+            If None, no survival probabilities will be calculated.
+        rmst_time_points : list of float, optional
+            Specific time horizons (in same units as duration_col) for restricted mean survival time (RMST) estimation.
+            If None, RMST will not be calculated.
+        median_time : bool, optional
+            Whether to calculate median survival time (e.g., median overall survival) with bootstrapped confidence intervals.
+        n_bootstrap : int, default=1000
+            Number of bootstrap iterations used to estimate confidence intervals.
+        random_state : int, optional
+            Seed for reproducibility of bootstrap resampling.
+
+        Returns
+        -------
+        results : dict
+            Dictionary containing survival metrics and 95% confidence intervals for treatment and control groups,
+            as well as the difference between them. Example format:
+            {
+                'treatment': {
+                    'median': (est, lower_ci, upper_ci),
+                    'survival_prob': {6: (est, lci, uci), 12: (est, lci, uci)},
+                    'rmst': {24: (est, lci, uci)}
+                },
+                'control': {
+                    ...
+                },
+                'difference': {
+                    ...
+                }
+            }
+
+        Notes
+        -----
+        This method requires that .fit() or .fit_transform() has been run prior to use. During each bootstrap iteration, weights 
+        are recalculated using the variables provided in the original .fit() or .fit_transform() call, including stabilization and 
+        propensity score clipping preferences.
+        """
+
+        # Input validation for df 
+        if not isinstance(df, pd.DataFrame):
+            raise ValueError("df must be a pandas DataFrame")
+        if self.weight_df is None:
+            raise ValueError("No model state found. Please run .fit() or .fit_transform() before calling survival_metrics().")
+        if df.shape[0] != self.weight_df.shape[0]:
+            raise ValueError("df appears to be a different size than the one submitted in .fit() or .fit_transform().")
+        missing_vars = [col for col in self.all_var if col not in df.columns]
+        if missing_vars:
+            raise ValueError(f"The following variables used in the IPTW model are missing from df: {missing_vars}.")
+
+        # Input validation for weight_col and duration_col
+        if weight_col is None:
+            weight_col = self.weight_col
+        for col in [weight_col, duration_col]:
+            if col not in df.columns:
+                raise ValueError(f"Column '{col}' not found in dataframe.")
+            if df[col].isnull().any():
+                raise ValueError(f"Column '{col}'contains missing values.")
+            if (df[col] < 0).any():
+                raise ValueError(f"Column '{col}' must contain non-negative values only.")
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                raise ValueError(f"Column '{col}' must be numeric (int or float).")
+            
+        # Input validation for treatment_col and event_col
+        for col in [self.treatment_col, event_col]: 
+            if col not in df.columns:
+                raise ValueError(f"Column '{col}' not found in dataframe.")
+            if df[col].isnull().any():
+                raise ValueError(f"Column '{col}' has missing values.")
+            if not set(df[col].unique()).issubset({0, 1}):
+                raise ValueError(f"Column '{col}' must contain only binary values (0 and 1).")
+            if not pd.api.types.is_integer_dtype(df[col]):
+                raise ValueError(f"Column '{col}' must be of integer type.")
+
+        if (
+            psurv_time_points is None 
+            and rmst_time_points is None 
+            and not median_time
+        ):
+            raise ValueError("At least one of psurv_time_points, rmst_time_points, or median_time must be specified.")
+
+        # Input validation for psurv_time_points and rmst_time_points
+        for name, arg in [("psurv_time_points", psurv_time_points), 
+                          ("rmst_time_points", rmst_time_points)]:
+            if arg is not None:
+                if not isinstance(arg, list):
+                    raise ValueError(f"{name} must be a list of floats or ints.")
+                if not all(isinstance(t, (float, int)) for t in arg):
+                    raise ValueError(f"All values in {name} must be numeric (float or int).")
+                if any(t <= 0 for t in arg):
+                    raise ValueError(f"All values in {name} must be positive.")
+
+        # Input validation for median_time
+        if not isinstance(median_time, bool):
+            raise ValueError("median_time must be a boolean (True or False).")
+
+        # Input validation for n_bootstrap
+        if not isinstance(n_bootstrap, int) or n_bootstrap <= 0:
+            raise ValueError("n_bootstrap must be a positive integer.")
+
+        # Input validation for random_state
+        if random_state is not None:
+            if not isinstance(random_state, int):
+                raise ValueError("random_state must be an integer or None.")
+
+            
+
+
         
-
-
-    
