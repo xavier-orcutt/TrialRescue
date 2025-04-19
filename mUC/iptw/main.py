@@ -30,9 +30,9 @@ if __name__ == "__main__":
                   binary_var= ['Surgery', 'ecog_newly_gte2'],
                   stabilized=False)
     
-    a.to_csv('../outputs/iptw_df.csv', index = False)
+    #a.to_csv('../outputs/iptw_df.csv', index = False)
 
     b, c = estimator.smd(return_fig = True)
-    b.to_csv('../outputs/smd_df.csv', index = False)
+    #b.to_csv('../outputs/smd_df.csv', index = False)
 
     embed()
