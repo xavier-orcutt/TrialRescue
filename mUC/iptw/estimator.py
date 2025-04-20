@@ -39,6 +39,8 @@ class IPTWEstimator:
         self.weight_col = 'iptw'
         self.weight_df = None
         self.smd_results_df = None
+        self.survival_metrics_dic = None
+        self.km_confidence_interval_df = None
 
     def fit(self, 
             df: pd.DataFrame, 
@@ -595,7 +597,6 @@ class IPTWEstimator:
         are recalculated using the variables provided in the original .fit() or .fit_transform() call. Recalculated weights respect 
         the `stabilized` and `clip_bounds` parameters from the initial .fit() or .fit_transform() call.
         """
-
         # Input validation for df 
         if not isinstance(df, pd.DataFrame):
             raise ValueError("df must be a pandas DataFrame")
@@ -821,6 +822,7 @@ class IPTWEstimator:
                 uci = np.percentile(boot_results[group]['median'], 97.5)
                 final_results[group]['median'] = (float(est), float(lci), float(uci))
         
+        self.survival_metrics_dic = final_results
         return final_results
 
     def km_confidence_intervals(self,
@@ -829,11 +831,11 @@ class IPTWEstimator:
                                 event_col: str, 
                                 weight_col: str = 'iptw',
                                 n_bootstrap: int = 1000,
-                                random_state: Optional[int] = None) -> dict:
+                                random_state: Optional[int] = None) -> pd.DataFrame:
 
         """
-        Estimating survival curves with 95% confidence intervals at each time point 
-        for IPTW-adjusted Kaplan-Meier curves using bootstrap. 
+        Estimate IPTW-adjusted Kaplan-Meier survival curves with 95% confidence intervals at each 
+        time point using bootstrap resampling.
 
         Parameters
         ----------
@@ -874,6 +876,160 @@ class IPTWEstimator:
         are recalculated using the variables provided in the original .fit() or .fit_transform() call. Recalculated weights respect 
         the `stabilized` and `clip_bounds` parameters from the initial .fit() or .fit_transform() call.
         """
+        # Input validation for df 
+        if not isinstance(df, pd.DataFrame):
+            raise ValueError("df must be a pandas DataFrame")
+        if self.weight_df is None:
+            raise ValueError("No model state found. Please run .fit() or .fit_transform() before calling survival_metrics().")
+        if df.shape[0] != self.weight_df.shape[0]:
+            raise ValueError("df appears to be a different size than the one submitted in .fit() or .fit_transform().")
+        missing_vars = [col for col in self.all_var if col not in df.columns]
+        if missing_vars:
+            raise ValueError(f"The following variables used in the IPTW model are missing from df: {missing_vars}.")
+
+        # Input validation for weight_col and duration_col
+        for col in [weight_col, duration_col]:
+            if col not in df.columns:
+                raise ValueError(f"Column '{col}' not found in dataframe.")
+            if df[col].isnull().any():
+                raise ValueError(f"Column '{col}'contains missing values.")
+            if (df[col] < 0).any():
+                raise ValueError(f"Column '{col}' must contain non-negative values only.")
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                raise ValueError(f"Column '{col}' must be numeric (int or float).")
+            
+        # Input validation for treatment_col and event_col
+        for col in [self.treatment_col, event_col]: 
+            if col not in df.columns:
+                raise ValueError(f"Column '{col}' not found in dataframe.")
+            if df[col].isnull().any():
+                raise ValueError(f"Column '{col}' has missing values.")
+            if not set(df[col].unique()).issubset({0, 1}):
+                raise ValueError(f"Column '{col}' must contain only binary values (0 and 1).")
+            if not pd.api.types.is_integer_dtype(df[col]):
+                raise ValueError(f"Column '{col}' must be of integer type.")
+
+        # Input validation for n_bootstrap
+        if not isinstance(n_bootstrap, int) or n_bootstrap <= 0:
+            raise ValueError("n_bootstrap must be a positive integer.")
+
+        # Input validation for random_state
+        if random_state is not None:
+            if not isinstance(random_state, int):
+                raise ValueError("random_state must be an integer or None.")
+
+        # Estimate survival times
+        # Kaplan-Meier models 
+        treat_km = KaplanMeierFitter()
+        control_km = KaplanMeierFitter()
+
+        treat_mask = df[self.treatment_col] == 1
+        control_mask = df[self.treatment_col] == 0
+
+        # Initialize time 
+        time = np.unique(df[duration_col])
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category = StatisticalWarning)
+            treat_km.fit(
+                durations = df.loc[treat_mask, duration_col],
+                event_observed = df.loc[treat_mask, event_col],
+                timeline = time,
+                weights = df.loc[treat_mask, weight_col]
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category = StatisticalWarning)
+            control_km.fit(
+                durations = df.loc[control_mask, duration_col],
+                event_observed = df.loc[control_mask, event_col],
+                timeline = time,
+                weights = df.loc[control_mask, weight_col]
+            )
+        
+        # Extract survival probabilities directly
+        treatment_est = treat_km.survival_function_['KM_estimate'].values
+        control_est = control_km.survival_function_['KM_estimate'].values
+
+        # Build DataFrame
+        estimate_df = pd.DataFrame({
+            'time': time,
+            'treatment_estimate': treatment_est,
+            'control_estimate': control_est
+        })
+
+        # Calculate bootstrapped 95% CIs
+        # Arrays to store survival probabilities for each bootstrap sample
+        treatment_boot = np.zeros((n_bootstrap, len(time)))
+        control_boot = np.zeros((n_bootstrap, len(time)))
+
+        # Loop over n_bootstrap
+        rng = np.random.default_rng(seed = random_state)
+        for i in range(n_bootstrap):
+            
+            # Sample with replacement using random indices
+            indices = rng.choice(df.index, size = len(df), replace = True)
+            df_boot = df.loc[indices].reset_index(drop = True)
+
+            # Recalculate weights using saved model spec
+            df_boot_weighted = self.fit_transform(
+                df_boot,
+                treatment_col = self.treatment_col,
+                cat_var = self.cat_var,
+                cont_var = self.cont_var,
+                binary_var = self.binary_var,
+                stabilized = self.stabilized,
+                lr_kwargs = self.lr_kwargs,
+                clip_bounds = self.clip_bounds
+            )
+
+            # Kaplan-Meier models 
+            treat_km = KaplanMeierFitter()
+            control_km = KaplanMeierFitter()
+
+            treat_mask = df_boot_weighted[self.treatment_col] == 1
+            control_mask = df_boot_weighted[self.treatment_col] == 0
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category = StatisticalWarning)
+                treat_km.fit(
+                    durations = df_boot_weighted.loc[treat_mask, duration_col],
+                    event_observed = df_boot_weighted.loc[treat_mask, event_col],
+                    timeline = time,
+                    weights = df_boot_weighted.loc[treat_mask, weight_col]
+                )
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category = StatisticalWarning)
+                control_km.fit(
+                    durations = df_boot_weighted.loc[control_mask, duration_col],
+                    event_observed = df_boot_weighted.loc[control_mask, event_col],
+                    timeline = time,
+                    weights = df_boot_weighted.loc[control_mask, weight_col]
+                )
+            
+            treatment_boot[i, :] = treat_km.survival_function_['KM_estimate'].values
+            control_boot[i, :] = control_km.survival_function_['KM_estimate'].values
+
+        boot_df = pd.DataFrame({
+            'time': time,
+            'treatment_lower_ci': np.percentile(treatment_boot, 2.5, axis = 0),
+            'treatment_upper_ci': np.percentile(treatment_boot, 97.5, axis = 0),
+            'control_lower_ci': np.percentile(control_boot, 2.5, axis = 0),
+            'control_upper_ci': np.percentile(control_boot, 97.5, axis = 0)
+        })
+
+        final_df = pd.merge(estimate_df, boot_df, on = 'time')
+        self.km_confidence_interval_df = final_df
+        return final_df
+
+
+
+
+
+                    
+
+
 
 
 

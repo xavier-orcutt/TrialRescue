@@ -36,14 +36,11 @@ if __name__ == "__main__":
     #b, c = estimator.smd(return_fig = True)
     #b.to_csv('../outputs/smd_df.csv', index = False)
 
-    b = estimator.survival_metrics(df = a,
+    b = estimator.km_confidence_intervals(df = a,
                                    duration_col = 'duration',
                                    event_col = 'event',
                                    weight_col = 'iptw',
-                                   psurv_time_points = [180],
-                                   rmst_time_points = [365],
-                                   median_time = True,
-                                   n_bootstrap = 100,
+                                   n_bootstrap = 500,
                                    random_state = 42)
 
     embed()
