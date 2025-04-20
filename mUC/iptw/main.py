@@ -19,8 +19,9 @@ if __name__ == "__main__":
     dtype_map = pd.read_csv('../outputs/final_df_dtypes.csv', index_col = 0).iloc[:, 0].to_dict()
     df = pd.read_csv('../outputs/final_df.csv', dtype = dtype_map)
     df_death = pd.read_csv('../outputs/full_cohort_with_death_data.csv', dtype = dtype_map)
-    df = pd.merge(df, df_death[['PatientID', 'LineName']], on = 'PatientID', how = 'left')
+    df = pd.merge(df, df_death[['PatientID', 'LineName', 'event', 'duration']], on = 'PatientID', how = 'left')
     df['treatment'] = np.where(df['LineName'] == 'chemo', 0, 1)
+    df = df.query('duration >0')
 
 
     a = estimator.fit_transform(df = df,
@@ -32,7 +33,17 @@ if __name__ == "__main__":
     
     #a.to_csv('../outputs/iptw_df.csv', index = False)
 
-    b, c = estimator.smd(return_fig = True)
+    #b, c = estimator.smd(return_fig = True)
     #b.to_csv('../outputs/smd_df.csv', index = False)
+
+    b = estimator.survival_metrics(df = a,
+                                   duration_col = 'duration',
+                                   event_col = 'event',
+                                   weight_col = 'iptw',
+                                   psurv_time_points = [180],
+                                   rmst_time_points = [365],
+                                   median_time = True,
+                                   n_bootstrap = 100,
+                                   random_state = 42)
 
     embed()

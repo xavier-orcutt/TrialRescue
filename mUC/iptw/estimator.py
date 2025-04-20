@@ -12,7 +12,10 @@ from sklearn.linear_model import LogisticRegression
 import matplotlib.pyplot as plt
 
 from lifelines import KaplanMeierFitter
-from lifelines.utils import restricted_mean_survival_time
+from lifelines.utils import restricted_mean_survival_time, median_survival_times
+from lifelines.exceptions import StatisticalWarning
+
+import warnings
 
 logging.basicConfig(
     level = logging.INFO,                                 
@@ -28,10 +31,12 @@ class IPTWEstimator:
         self.binary_var = []
         self.all_var = []
         self.stabilized = False
+        self.lr_kwargs = {}
         self.clip_bounds = None
 
+        self.propensity_score_col = 'propensity_score'
         self.propensity_score_df = None
-        self.weight_col = None
+        self.weight_col = 'iptw'
         self.weight_df = None
         self.smd_results_df = None
 
@@ -71,12 +76,13 @@ class IPTWEstimator:
         Returns
         -------
         None
-            Updates internal state with propensity scores. Use `.transform()` to calculate weights
+            Updates internal state with propensity scores. Use .transform() to calculate weights
 
         Notes
         -----
-        - This method only estimates propensity scores. Weights are calculated in `.transform()`.
-        - At least one of cat_var, cont_var, or binary_var must be provided.
+        This method only estimates propensity scores. Weights are calculated in .transform().
+        At least one of cat_var, cont_var, or binary_var must be provided.
+        If user does not specify clipping, safety clipping with 1e-6 is ued to avoid extreme weights.
         """
 
         # Input validation 
@@ -167,9 +173,10 @@ class IPTWEstimator:
         self.cont_var = cont_var or []
         self.binary_var = binary_var or []
         self.all_var = self.cat_var + self.cont_var + self.binary_var
-
+        
         self.treatment_col = treatment_col
         self.stabilized = stabilized
+        self.lr_kwargs = lr_kwargs or {}
         self.clip_bounds = clip_bounds
         
         df = df.copy()
@@ -202,12 +209,15 @@ class IPTWEstimator:
         lr_model.fit(X_preprocessed, df[treatment_col])
         propensity_score = lr_model.predict_proba(X_preprocessed)[:, 1] # Select second column for probability of receiving treatment 
         
-        # Apply clipping if requested
+        # Apply clipping 
         if self.clip_bounds is not None:
             lower, upper = self.clip_bounds
             propensity_score = np.clip(propensity_score, lower, upper)
+        else: 
+            eps = 1e-6 # Small buffer to avoid division by zero when calculating IPTW in .transform()
+            propensity_score = np.clip(propensity_score, eps, 1 - eps)
         
-        df['propensity_score'] = propensity_score
+        df[self.propensity_score_col] = propensity_score
         self.propensity_score_df = df
     
     def transform(self) -> pd.DataFrame:
@@ -231,26 +241,25 @@ class IPTWEstimator:
         - Must call `.fit()` before calling `.transform()`.
         """
         if self.propensity_score_df is None:
-            raise ValueError("Model not fitted. Please run `.fit()` first.")
+            raise ValueError("Propensity scores were not calculated. Did you forget to run .fit() first?")
 
         df = self.propensity_score_df.copy()
 
         if self.stabilized:
             p_treated = df[self.treatment_col].mean()
-            df['iptw'] = np.where(
+            df[self.weight_col] = np.where(
                 df[self.treatment_col] == 1,
-                p_treated / df['propensity_score'],
-                (1 - p_treated) / (1 - df['propensity_score'])
+                p_treated / df[self.propensity_score_col],
+                (1 - p_treated) / (1 - df[self.propensity_score_col])
             )
 
         else:
-            df['iptw'] = np.where(
+            df[self.weight_col] = np.where(
                 df[self.treatment_col] == 1,
-                1 / df['propensity_score'],
-                1 / (1 - df['propensity_score'])
+                1 / df[self.propensity_score_col],
+                1 / (1 - df[self.propensity_score_col])
             )
 
-        self.weight_col = 'iptw'
         self.weight_df = df
         return df
     
@@ -654,58 +663,164 @@ class IPTWEstimator:
         treat_mask = df[self.treatment_col] == 1
         control_mask = df[self.treatment_col] == 0
 
-        treat_km.fit(
-            durations = df.loc[treat_mask, self.duration_col],
-            event_observed = df.loc[treat_mask, self.event_col],
-            weights = df.loc[treat_mask, weight_col]
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category = StatisticalWarning)
+            treat_km.fit(
+                durations = df.loc[treat_mask, duration_col],
+                event_observed = df.loc[treat_mask, event_col],
+                weights = df.loc[treat_mask, weight_col]
+            )
 
-        control_km.fit(
-            durations = df.loc[control_mask, self.duration_col],
-            event_observed = df.loc[control_mask, self.event_col],
-            weights = df.loc[control_mask, weight_col]
-        )
-
-        results = {
-            'treatment': {},
-            'control': {},
-            'difference': {}
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category = StatisticalWarning)
+            control_km.fit(
+                durations = df.loc[control_mask, duration_col],
+                event_observed = df.loc[control_mask, event_col],
+                weights = df.loc[control_mask, weight_col]
+            )
+        
+        # Initialize empty dictionaries 
+        estimate = {
+            'treatment': {'survival_prob': {}, 'rmst': {}, 'median': []},
+            'control': {'survival_prob': {}, 'rmst': {}, 'median': []},
+            'difference': {'survival_prob': {}, 'rmst': {}, 'median': []}
         }
 
         # Probability of survival at selected time points
         if psurv_time_points is not None:
-            results['treatment']['survival_prob'] = {}
-            results['control']['survival_prob'] = {}
-            results['difference']['survival_prob'] = {}
-            
             for t in psurv_time_points:
                 treat_surv = treat_km.predict(t)
                 control_surv = control_km.predict(t)
-                results['treatment']['survival_prob'][t] = treat_surv
-                results['control']['survival_prob'][t] = control_surv
-                results['difference']['survival_prob'][t] = treat_surv - control_surv
+                estimate['treatment']['survival_prob'][t] = treat_surv
+                estimate['control']['survival_prob'][t] = control_surv
+                estimate['difference']['survival_prob'][t] = treat_surv - control_surv
 
         # RMST calculation at selected time points
         if rmst_time_points is not None: 
-            results['treatment']['rmst'] = {}
-            results['control']['rmst'] = {}
-            results['difference']['rmst'] = {}
-
             for t in rmst_time_points:
                 treat_rmst = restricted_mean_survival_time(treat_km, t=t)
                 control_rmst = restricted_mean_survival_time(control_km, t=t)
-                results['treatment']['rmst'][t] = treat_rmst
-                results['control']['rmst'][t] = control_rmst
-                results['difference']['rmst'][t] = treat_rmst - control_rmst
+                estimate['treatment']['rmst'][t] = treat_rmst
+                estimate['control']['rmst'][t] = control_rmst
+                estimate['difference']['rmst'][t] = treat_rmst - control_rmst
 
         # Median survival time calculations
         if median_time: 
-            # perform calculation
+            treat_med = treat_km.median_survival_time_
+            control_med = control_km.median_survival_time_
+            estimate['treatment']['median'] = treat_med
+            estimate['control']['median'] = control_med
+            estimate['difference']['median'] = treat_med - control_med
+
+        # Calculate bootstrapped 95% CIs
+        # Initialize empty disctionaries for bootstrapped results 
+        boot_results = {
+            'treatment': {'survival_prob': {}, 'rmst': {}, 'median': []},
+            'control': {'survival_prob': {}, 'rmst': {}, 'median': []},
+            'difference': {'survival_prob': {}, 'rmst': {}, 'median': []}
+        }
+
+        # Loop over n_bootstrap
+        rng = np.random.default_rng(seed = random_state)
+        for i in range(n_bootstrap):
+            
+            # Sample with replacement using random indices
+            indices = rng.choice(df.index, size = len(df), replace = True)
+            df_boot = df.loc[indices].reset_index(drop=True)
+
+            # Recalculate weights using saved model spec
+            df_boot_weighted = self.fit_transform(
+                df_boot,
+                treatment_col = self.treatment_col,
+                cat_var = self.cat_var,
+                cont_var = self.cont_var,
+                binary_var = self.binary_var,
+                stabilized = self.stabilized,
+                lr_kwargs = self.lr_kwargs,
+                clip_bounds = self.clip_bounds
+            )
+
+            # Kaplan-Meier models 
+            treat_km = KaplanMeierFitter()
+            control_km = KaplanMeierFitter()
+
+            treat_mask = df_boot_weighted[self.treatment_col] == 1
+            control_mask = df_boot_weighted[self.treatment_col] == 0
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category = StatisticalWarning)
+                treat_km.fit(
+                    durations = df_boot_weighted.loc[treat_mask, duration_col],
+                    event_observed = df_boot_weighted.loc[treat_mask, event_col],
+                    weights = df_boot_weighted.loc[treat_mask, weight_col]
+                )
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category = StatisticalWarning)
+                control_km.fit(
+                    durations = df_boot_weighted.loc[control_mask, duration_col],
+                    event_observed = df_boot_weighted.loc[control_mask, event_col],
+                    weights = df_boot_weighted.loc[control_mask, weight_col]
+                )
+
+            # Calculate survival metrics
+            if psurv_time_points is not None:
+                for t in psurv_time_points:
+                    boot_results['treatment']['survival_prob'].setdefault(t, []).append(treat_km.predict(t))
+                    boot_results['control']['survival_prob'].setdefault(t, []).append(control_km.predict(t))
+                    boot_results['difference']['survival_prob'].setdefault(t, []).append(
+                        treat_km.predict(t) - control_km.predict(t)
+                    )
+
+            if rmst_time_points is not None:
+                for t in rmst_time_points:
+                    treat_rmst = restricted_mean_survival_time(treat_km, t=t)
+                    control_rmst = restricted_mean_survival_time(control_km, t=t)
+                    boot_results['treatment']['rmst'].setdefault(t, []).append(treat_rmst)
+                    boot_results['control']['rmst'].setdefault(t, []).append(control_rmst)
+                    boot_results['difference']['rmst'].setdefault(t, []).append(treat_rmst - control_rmst)
+
+            if median_time:
+                treat_med = treat_km.median_survival_time_
+                control_med = control_km.median_survival_time_
+                boot_results['treatment']['median'].append(treat_med)
+                boot_results['control']['median'].append(control_med)
+                boot_results['difference']['median'].append(treat_med - control_med)
+
+        # Get estimate plus lower 2.5%, and upper 97.5% of boot_results
+        final_results = {
+            'treatment': {'survival_prob': {}, 'rmst': {}, 'median': None},
+            'control':   {'survival_prob': {}, 'rmst': {}, 'median': None},
+            'difference':{'survival_prob': {}, 'rmst': {}, 'median': None}
+        }
+
+        for group in ['treatment', 'control', 'difference']:
+            if psurv_time_points is not None:
+                for t in psurv_time_points:
+                    est = estimate[group]['survival_prob'][t]
+                    lci = np.percentile(boot_results[group]['survival_prob'][t], 2.5)
+                    uci = np.percentile(boot_results[group]['survival_prob'][t], 97.5)
+                    final_results[group]['survival_prob'][t] = (float(est), float(lci), float(uci))
+
+            if rmst_time_points is not None:
+                for t in rmst_time_points:
+                    est = estimate[group]['rmst'][t]
+                    lci = np.percentile(boot_results[group]['rmst'][t], 2.5)
+                    uci = np.percentile(boot_results[group]['rmst'][t], 97.5)
+                    final_results[group]['rmst'][t] = (float(est), float(lci), float(uci))
+
+            if median_time:
+                est = estimate[group]['median']
+                lci = np.percentile(boot_results[group]['median'], 2.5)
+                uci = np.percentile(boot_results[group]['median'], 97.5)
+                final_results[group]['median'] = (float(est), float(lci), float(uci))
+        
+        return final_results
 
 
+
+
+                
 
 
             
-
-
-        
