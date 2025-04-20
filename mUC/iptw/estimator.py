@@ -35,12 +35,12 @@ class IPTWEstimator:
         self.clip_bounds = None
 
         self.propensity_score_col = 'propensity_score'
-        self.propensity_score_df = None
+        self.propensity_scores_ = None
         self.weight_col = 'iptw'
-        self.weight_df = None
-        self.smd_results_df = None
-        self.survival_metrics_dic = None
-        self.km_confidence_interval_df = None
+        self.weights_ = None
+        self.smd_results_ = None
+        self.survival_metrics_ = None
+        self.km_confidence_intervals_ = None
 
     def fit(self, 
             df: pd.DataFrame, 
@@ -222,7 +222,7 @@ class IPTWEstimator:
             propensity_score = np.clip(propensity_score, eps, 1 - eps)
         
         df[self.propensity_score_col] = propensity_score
-        self.propensity_score_df = df
+        self.propensity_scores_ = df
     
     def transform(self) -> pd.DataFrame:
         """
@@ -244,10 +244,10 @@ class IPTWEstimator:
         - If stabilized = True, weights are multiplied by the marginal probability of treatment or control.
         - Must call `.fit()` before calling `.transform()`.
         """
-        if self.propensity_score_df is None:
+        if self.propensity_scores_ is None:
             raise ValueError("Propensity scores were not calculated. Did you forget to run .fit() first?")
 
-        df = self.propensity_score_df.copy()
+        df = self.propensity_scores_.copy()
 
         if self.stabilized:
             p_treated = df[self.treatment_col].mean()
@@ -264,7 +264,7 @@ class IPTWEstimator:
                 1 / (1 - df[self.propensity_score_col])
             )
 
-        self.weight_df = df
+        self.weights_ = df
         return df
     
     def fit_transform(self, 
@@ -296,7 +296,7 @@ class IPTWEstimator:
             Number of bins for the histogram
 
         This method uses internal attributes set during the .fit() or fit_transform() calls:
-            - self.propensity_score_df : the DataFrame with variables, treatment, and propensity scores 
+            - self.propensity_scores_ : the DataFrame with variables, treatment, and propensity scores 
 
         Returns
         -------
@@ -308,13 +308,13 @@ class IPTWEstimator:
         This method requires that .fit() or .fit_transform() has been run prior to use.
         """
         # Input validation 
-        if self.propensity_score_df is None:
-            raise ValueError("propensity_score_df is None. Please call `.fit()` or `.fit_transform()` first.")
+        if self.propensity_scores_ is None:
+            raise ValueError("propensity_scores_ is None. Please call `.fit()` or `.fit_transform()` first.")
         
         if not isinstance(bins, int) or bins <= 0:
             raise ValueError("bins must be a positive integer.")
         
-        df = self.propensity_score_df
+        df = self.propensity_scores_
         treatment_col = self.treatment_col
 
         fig, ax = plt.subplots(figsize=(8, 5))
@@ -397,14 +397,14 @@ class IPTWEstimator:
         # Input validation ensures .fit() or .fit_transform() has been run
         if not self.all_var:
             raise ValueError("Please run .fit() or .fit_transform() before calling smd().")
-        if self.weight_df is None:
+        if self.weights_ is None:
             raise ValueError("Please run .fit() or .fit_transform() before calling smd().")
 
         # Input validation for return_fig
         if not isinstance(return_fig, bool):
             raise ValueError("return_fig must be a boolean (True or False).")
 
-        smd_df = self.weight_df[self.all_var + [self.treatment_col] + [self.weight_col]].copy()
+        smd_df = self.weights_[self.all_var + [self.treatment_col] + [self.weight_col]].copy()
 
         # Calculate SMD for continuous variables 
         smd_cont = []
@@ -497,7 +497,7 @@ class IPTWEstimator:
         smd_results_df['smd_weighted'] = smd_results_df['smd_weighted'].abs()
         smd_results_df = smd_results_df.sort_values(by = 'smd_unweighted', ascending = True).reset_index(drop = True)
 
-        self.smd_results_df = smd_results_df
+        self.smd_results_ = smd_results_df
         
         if return_fig:
             fig, ax = plt.subplots(figsize=(8, 0.4 * len(smd_results_df) + 2))
@@ -600,9 +600,9 @@ class IPTWEstimator:
         # Input validation for df 
         if not isinstance(df, pd.DataFrame):
             raise ValueError("df must be a pandas DataFrame")
-        if self.weight_df is None:
+        if self.weights_ is None:
             raise ValueError("No model state found. Please run .fit() or .fit_transform() before calling survival_metrics().")
-        if df.shape[0] != self.weight_df.shape[0]:
+        if df.shape[0] != self.weights_.shape[0]:
             raise ValueError("df appears to be a different size than the one submitted in .fit() or .fit_transform().")
         missing_vars = [col for col in self.all_var if col not in df.columns]
         if missing_vars:
@@ -822,7 +822,7 @@ class IPTWEstimator:
                 uci = np.percentile(boot_results[group]['median'], 97.5)
                 final_results[group]['median'] = (float(est), float(lci), float(uci))
         
-        self.survival_metrics_dic = final_results
+        self.survival_metrics_ = final_results
         return final_results
 
     def km_confidence_intervals(self,
@@ -879,9 +879,9 @@ class IPTWEstimator:
         # Input validation for df 
         if not isinstance(df, pd.DataFrame):
             raise ValueError("df must be a pandas DataFrame")
-        if self.weight_df is None:
+        if self.weights_ is None:
             raise ValueError("No model state found. Please run .fit() or .fit_transform() before calling survival_metrics().")
-        if df.shape[0] != self.weight_df.shape[0]:
+        if df.shape[0] != self.weights_.shape[0]:
             raise ValueError("df appears to be a different size than the one submitted in .fit() or .fit_transform().")
         missing_vars = [col for col in self.all_var if col not in df.columns]
         if missing_vars:
@@ -1020,7 +1020,7 @@ class IPTWEstimator:
         })
 
         final_df = pd.merge(estimate_df, boot_df, on = 'time')
-        self.km_confidence_interval_df = final_df
+        self.km_confidence_intervals_ = final_df
         return final_df
 
 
