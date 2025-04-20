@@ -68,7 +68,9 @@ class IPTWEstimator:
         stabilized : bool, default = False
             If True, enables stabilized weights in the transform step.
         lr_kwargs : dict, optional
-            Additional keyword arguments passed to sklearn's LogisticRegression.
+            Additional keyword arguments passed to sklearn's LogisticRegression. To ensure reproducibility when using 
+            bootstrapped survival methods (e.g., .survival_metrics() or .km_confidence_intervals()), consider setting 
+            random_state in lr_kwargs.
         clip_bounds : tuple of float or list of float, optional
             If provided, clip propensity scores to this (min, max) range. 
             Common choice is (0.01, 0.99) to reduce the influence of extreme values.
@@ -535,8 +537,9 @@ class IPTWEstimator:
                          random_state: Optional[int] = None) -> dict:
 
         """
-        Estimate survival metrics for treatment group, control group, and their difference using 
-        IPTW-adjusted Kaplan-Meier analysis with bootstrapped 95% confidence intervals.
+        Estimate survival metrics at discrete time points for treatment group, control group, 
+        and their difference using IPTW-adjusted Kaplan-Meier analysis with bootstrapped 95% 
+        confidence intervals.
 
         Parameters
         ----------
@@ -562,7 +565,10 @@ class IPTWEstimator:
         n_bootstrap : int, default=1000
             Number of bootstrap iterations used to estimate confidence intervals.
         random_state : int, optional
-            Seed for reproducibility of bootstrap resampling.
+            Seed for reproducibility of bootstrap resampling. If you want .survival_metrics() and .km_confidence_intervals() to 
+            use identical resamples and produce aligned results, pass the same integer to both methods.  
+            To ensure complete reproducibility, also consider passing random_state to the logistic regression model via lr_kwargs 
+            in .fit() or fit_transform() to fix propensity score estimation.
 
         Returns
         -------
@@ -726,7 +732,7 @@ class IPTWEstimator:
             
             # Sample with replacement using random indices
             indices = rng.choice(df.index, size = len(df), replace = True)
-            df_boot = df.loc[indices].reset_index(drop=True)
+            df_boot = df.loc[indices].reset_index(drop = True)
 
             # Recalculate weights using saved model spec
             df_boot_weighted = self.fit_transform(
@@ -817,6 +823,57 @@ class IPTWEstimator:
         
         return final_results
 
+    def km_confidence_intervals(self,
+                                df: pd.DataFrame,
+                                duration_col: str,
+                                event_col: str, 
+                                weight_col: str = 'iptw',
+                                n_bootstrap: int = 1000,
+                                random_state: Optional[int] = None) -> dict:
+
+        """
+        Estimating survival curves with 95% confidence intervals at each time point 
+        for IPTW-adjusted Kaplan-Meier curves using bootstrap. 
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Input dataframe containing survival data, treatment assignment, and all variables used 
+            in the IPTW model. This should match the structure of the dataframe used in the original 
+            fit()/fit_transform() call.
+        duration_col : str
+            Name of the column containing the survival duration (e.g., time to event or censoring).
+        event_col : str
+            Name of the column indicating event occurrence (1 = event, 0 = censored). Must be of integer type. 
+        weight_col : str 
+            Name of the column in `df` containing the IPTW weights. Defaults to the column name 
+            used in `.fit_transform()` ('iptw'). 
+        n_bootstrap : int, default=1000
+            Number of bootstrap iterations used to estimate confidence intervals.
+        random_state : int, optional
+            Seed for reproducibility of bootstrap resampling. If you want .survival_metrics() and .km_confidence_intervals() to 
+            use identical resamples and produce aligned results, pass the same integer to both methods.  
+            To ensure complete reproducibility, also consider passing random_state to the logistic regression model via lr_kwargs 
+            in .fit() or fit_transform() to fix propensity score estimation. 
+
+        Returns
+        -------
+        pd.DataFrame
+            Contains:
+                - 'time': common time grid
+                - 'treatment_estimate': point estimate of treatment group
+                - 'treatment_lower_ci': 2.5 percentile for treatment group
+                - 'treatment_upper_ci': 97.5 percentile for treatment group
+                - 'control_estimate': point estimate of control group
+                - 'control_lower_ci': 2.5 percentile for control group
+                - 'control_upper_ci': 97.5 percentile for control group 
+
+        Notes
+        -----
+        This method requires that .fit() or .fit_transform() has been run prior to use. During each bootstrap iteration, weights 
+        are recalculated using the variables provided in the original .fit() or .fit_transform() call. Recalculated weights respect 
+        the `stabilized` and `clip_bounds` parameters from the initial .fit() or .fit_transform() call.
+        """
 
 
 
