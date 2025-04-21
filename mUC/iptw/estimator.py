@@ -239,10 +239,10 @@ class IPTWEstimator:
 
         Notes
         -----
-        - For treated patients: weight = 1 / propensity score
-        - For control patients: weight = 1 / (1 - propensity score)
-        - If stabilized = True, weights are multiplied by the marginal probability of treatment or control.
-        - Must call `.fit()` before calling `.transform()`.
+        Must call `.fit()` before calling `.transform()`.
+        Formula for IPTWFor treated patients: weight = 1 / propensity score
+            - For control patients: weight = 1 / (1 - propensity score)
+            - If stabilized = True, weights are multiplied by the marginal probability of treatment or control.
         """
         if self.propensity_scores_ is None:
             raise ValueError("Propensity scores were not calculated. Did you forget to run .fit() first?")
@@ -285,8 +285,8 @@ class IPTWEstimator:
         self.fit(*args, **kwargs)
         return self.transform()
     
-    def ps_plot(self,
-                bins: int = 20): 
+    def propensity_score_plot(self,
+                              bins: int = 20): 
         """
         Generates a propensity score overlap plot for treatment vs control. 
 
@@ -320,7 +320,7 @@ class IPTWEstimator:
         fig, ax = plt.subplots(figsize=(8, 5))
 
         # Histogram for treated patients
-        ax.hist(df[df[treatment_col] == 1]['propensity_score'], 
+        ax.hist(df[df[treatment_col] == 1][self.propensity_score_col], 
                  bins = bins, 
                  alpha = 0.3, 
                  label = 'Treatment', 
@@ -328,9 +328,9 @@ class IPTWEstimator:
                  edgecolor='black')
         
         # Histogram for untreated patients (horizontal, with negative counts to "flip" it)
-        ax.hist(df[df[treatment_col] == 0]['propensity_score'], 
+        ax.hist(df[df[treatment_col] == 0][self.propensity_score_col], 
                  bins = bins, 
-                 weights= -np.ones_like(df[df[treatment_col] == 0]['propensity_score']),
+                 weights= -np.ones_like(df[df[treatment_col] == 0][self.propensity_score_col]),
                  alpha = 0.3, 
                  label = 'Control', 
                  color = 'green', 
@@ -351,8 +351,8 @@ class IPTWEstimator:
         fig.tight_layout()
         return fig
         
-    def smd(self,
-            return_fig: bool = False):
+    def standardized_mean_differences(self,
+                                      return_fig: bool = False):
         """
         Compute and plot standardized mean differences (SMDs) before and after weighting for all variables used in the IPTW model.
 
@@ -373,7 +373,7 @@ class IPTWEstimator:
                 - smd_weighted : SMD using IPTW 
 
         matplotlib.figure.Figure (optional)
-            Returned only if `return_fig=True`.
+            Returned only if return_fig = True.
             A plot showing unweighted and weighted SMDs for all included variables.
 
         Notes
@@ -391,14 +391,15 @@ class IPTWEstimator:
             - sd_treated / sd_control = standard deviations
             - p_treated / p_control = proportion of group members in a given category or with value == 1
         
-        Median is imputed for missing continuous variables. 
-        Categorical variables are one-hot-encoded.
+        Processing of variables: 
+            - Median is imputed for missing continuous variables. 
+            - Categorical variables are one-hot-encoded.
         """
         # Input validation ensures .fit() or .fit_transform() has been run
         if not self.all_var:
-            raise ValueError("Please run .fit() or .fit_transform() before calling smd().")
+            raise ValueError("Please run .fit() or .fit_transform() before calling standardized_mean_differences().")
         if self.weights_ is None:
-            raise ValueError("Please run .fit() or .fit_transform() before calling smd().")
+            raise ValueError("Please run .fit() or .fit_transform() before calling standardized_mean_differences().")
 
         # Input validation for return_fig
         if not isinstance(return_fig, bool):
