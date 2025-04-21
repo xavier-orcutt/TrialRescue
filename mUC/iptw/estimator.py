@@ -22,7 +22,7 @@ logging.basicConfig(
     format = '%(asctime)s - %(levelname)s - %(message)s'  
 )
 
-class IPTWEstimator:
+class IPTWSurvivalEstimator:
     
     def __init__(self):
         self.treatment_col = None
