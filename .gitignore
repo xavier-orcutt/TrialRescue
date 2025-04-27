@@ -24,3 +24,11 @@ mUC/notebooks/data_cleaning_mUC_test.ipynb
 mUC/notebooks/data_cleaning_mUC_training.ipynb
 mUC/notebooks/.ipynb_checkpoints/survival_full_cohort-checkpoint.ipynb
 mUC/notebooks/calculating_risk_score.ipynb
+mUC/notebooks/clustering_pembro75p.ipynb
+mUC/notebooks/clustering_pembro90d.ipynb
+mUC/notebooks/describing_clusters.ipynb
+mUC/notebooks/creating_clusters.ipynb
+mUC/notebooks/survival_cluster_pembro75p.ipynb
+mUC/notebooks/survival_cluster_pembro90d.ipynb
+mUC/notebooks/survival_pembro75p.ipynb
+mUC/notebooks/survival_pembro90d.ipynb
